@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import time
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Tuple
@@ -17,7 +18,7 @@ except ImportError:
 import bittensor as bt
 
 from poker44.base.miner import BaseMinerNeuron
-from poker44.miner_heuristics import get_chunk_scorer_startup_check, score_chunks_gen7heur8
+from poker44.miner_heuristics import get_chunk_scorer_startup_check, score_chunk_gen7heur9
 from poker44.utils.model_manifest import (
     build_local_model_manifest,
     evaluate_manifest_compliance,
@@ -62,6 +63,8 @@ class Miner(BaseMinerNeuron):
     def __init__(self, config=None):
         super(Miner, self).__init__(config=config)
         bt.logging.info("Heuristic Poker44 Miner started (gen10heur8)")
+        self.prediction_threshold = 0.5
+        self._task_response_cache = {}
 
         chunk_scorer = "gen10heur8"
         bt.logging.info("[init] POKER44_CHUNK_SCORER=gen10heur8 (hardcoded)")
@@ -119,6 +122,39 @@ class Miner(BaseMinerNeuron):
         self.manifest_digest = manifest_digest(self.model_manifest)
         self._log_manifest_startup(repo_root)
 
+    def _adapt_threshold_if_uniform(self, scores: List[float], predictions: List[bool]) -> Tuple[float, bool, str]:
+        if not scores or not predictions:
+            return self.prediction_threshold, False, ""
+        if not all(pred == predictions[0] for pred in predictions):
+            return self.prediction_threshold, False, ""
+
+        old_threshold = self.prediction_threshold
+        if predictions[0]:
+            new_threshold = min(1.0, min(scores) + 1e-6)
+            reason = "all_true"
+        else:
+            new_threshold = max(0.0, max(scores))
+            reason = "all_false"
+
+        if abs(new_threshold - old_threshold) < 1e-9:
+            bt.logging.debug(
+                f"[threshold] uniform batch={reason}; keeping threshold at {old_threshold:.6f}"
+            )
+            return old_threshold, False, reason
+
+        self.prediction_threshold = new_threshold
+        bt.logging.debug(
+            "[threshold] threshold updated "
+            f"from {old_threshold:.6f} to {new_threshold:.6f} "
+            f"after {reason} batch; scores_min={min(scores):.6f} scores_max={max(scores):.6f}"
+        )
+        return new_threshold, True, reason
+
+    @staticmethod
+    def _task_fingerprint(chunks: List[List[dict]]) -> str:
+        payload = json.dumps(chunks, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
     def _log_manifest_startup(self, repo_root: Path) -> None:
         bt.logging.info(
             f"Miner transparency status: {self.manifest_compliance['status']} "
@@ -138,8 +174,40 @@ class Miner(BaseMinerNeuron):
 
     async def forward(self, synapse: DetectionSynapse) -> DetectionSynapse:
         chunks: List[List[dict]] = synapse.chunks or []
+        task_fingerprint = self._task_fingerprint(chunks)
+        cached_response = self._task_response_cache.get(task_fingerprint)
 
-        scores, routes, _rebalance_stats = score_chunks_gen7heur8(chunks)
+        if cached_response is not None:
+            scores = list(cached_response["scores"])
+            routes = list(cached_response["routes"])
+            predictions = list(cached_response["predictions"])
+            threshold = float(cached_response["threshold"])
+            cache_status = "hit"
+        else:
+            scores = []
+            routes = []
+            threshold = self.prediction_threshold
+            for chunk in chunks:
+                score, _route = score_chunk_gen7heur9(chunk)
+                scores.append(float(score))
+                routes.append("gen10heur8")
+
+            predictions = [s >= threshold for s in scores]
+            new_threshold, changed, reason = self._adapt_threshold_if_uniform(scores, predictions)
+            if changed:
+                threshold = new_threshold
+                predictions = [s >= threshold for s in scores]
+                bt.logging.debug(
+                    f"[threshold] applying updated threshold={threshold:.6f} immediately for current {reason} batch"
+                )
+
+            self._task_response_cache[task_fingerprint] = {
+                "scores": list(scores),
+                "routes": list(routes),
+                "predictions": list(predictions),
+                "threshold": threshold,
+            }
+            cache_status = "miss"
 
         chunk_sizes = [len(chunk or []) for chunk in chunks]
 
@@ -153,7 +221,7 @@ class Miner(BaseMinerNeuron):
         bt.logging.debug(f"[miner] Received {len(chunks)} chunk(s); first sizes={_preview(chunk_sizes)}")
 
         synapse.risk_scores = scores
-        synapse.predictions = [s >= 0.5 for s in scores]
+        synapse.predictions = predictions
         synapse.model_manifest = dict(self.model_manifest)
 
         bt.logging.debug(
@@ -162,7 +230,8 @@ class Miner(BaseMinerNeuron):
         )
         bt.logging.debug(
             f"[miner] Responding with scores={_preview(scores)} "
-            f"routes={_preview(routes)} predictions={_preview(synapse.predictions)}"
+            f"routes={_preview(routes)} threshold={threshold:.6f} cache={cache_status} "
+            f"predictions={_preview(synapse.predictions)}"
         )
 
         source_hotkey = getattr(getattr(synapse, "dendrite", None), "hotkey", "unknown")
@@ -208,8 +277,8 @@ class Miner(BaseMinerNeuron):
         return allowed
 
     def score_chunk(self, chunk: list[dict]) -> float:
-        scores, _routes, _stats = score_chunks_gen7heur8([chunk])
-        return float(scores[0]) if scores else 0.5
+        score, _route = score_chunk_gen7heur9(chunk)
+        return float(score)
 
     async def blacklist(self, synapse: DetectionSynapse) -> Tuple[bool, str]:
         if synapse.dendrite is None or synapse.dendrite.hotkey is None:
