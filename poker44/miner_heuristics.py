@@ -1529,11 +1529,11 @@ def _load_gen7heur1_profile() -> dict:
     global _GEN7HEUR1_PROFILE
     if _GEN7HEUR1_PROFILE is not None:
         return _GEN7HEUR1_PROFILE
-    env_path = os.getenv("POKER44_GEN7HEUR7_PROFILE", "")
+    env_path = os.getenv("POKER44_GEN7HEUR9_PROFILE", "")
     if env_path:
         profile_path = Path(env_path)
     else:
-        profile_path = Path(__file__).resolve().parents[1] / "models" / "benchmark_heuristic_profile_gen7heur7.json"
+        profile_path = Path(__file__).resolve().parents[1] / "models" / "benchmark_heuristic_profile.json"
     import json as _json
     with open(profile_path, "r", encoding="utf-8") as _f:
         _GEN7HEUR1_PROFILE = _json.load(_f)
@@ -1703,6 +1703,14 @@ def score_chunk_gen7heur7(chunk: List[dict]) -> Tuple[float, str]:
     return score, route.replace("gen7heur1", "gen7heur7")
 
 
+def score_chunk_gen7heur9(chunk: List[dict]) -> Tuple[float, str]:
+    """Score a chunk with the gen7heur9 profile (same math as gen7heur1)."""
+    score, route = score_chunk_gen7heur1(chunk)
+    if route == "gen7heur1":
+        return score, "gen7heur9"
+    return score, route.replace("gen7heur1", "gen7heur9")
+
+
 
 
 def score_chunks_gen7heur8(chunks: List[List[dict]]) -> Tuple[List[float], List[str], Dict[str, int]]:
@@ -1783,11 +1791,11 @@ def get_chunk_scorer_startup_check(scorer: str) -> Dict[str, object]:
     }
 
     if scorer_norm in {"gen7heur8"}:
-        env_path = os.getenv("POKER44_GEN7HEUR7_PROFILE", "")
+        env_path = os.getenv("POKER44_GEN7HEUR9_PROFILE", "")
         profile_path = (
             Path(env_path)
             if env_path
-            else Path(__file__).resolve().parents[1] / "models" / "benchmark_heuristic_profile_gen7heur7.json"
+            else Path(__file__).resolve().parents[1] / "models" / "benchmark_heuristic_profile.json"
         )
         details = {
             "profile_path": str(profile_path),
