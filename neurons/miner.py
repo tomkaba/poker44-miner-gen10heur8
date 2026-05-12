@@ -101,7 +101,10 @@ class Miner(BaseMinerNeuron):
 
         self.model_manifest = build_local_model_manifest(
             repo_root=repo_root,
-            implementation_files=[Path(__file__).resolve()],
+            implementation_files=[
+                Path(__file__).resolve(),
+                repo_root / "poker44" / "__init__.py",
+            ],
             defaults={
                 "model_name": "poker44_gen10heur8",
                 "model_version": "10.8",
@@ -170,6 +173,11 @@ class Miner(BaseMinerNeuron):
             f"Manifest digest={self.manifest_digest} "
             f"inference_mode={self.model_manifest.get('inference_mode', '')}"
         )
+        bt.logging.info(
+            f"Implementation sha256={self.model_manifest.get('implementation_sha256', '')} "
+            f"files={len(self.model_manifest.get('implementation_files', []) or [])}"
+        )
+        bt.logging.info(f"[init] Full response manifest={self.model_manifest}")
         bt.logging.info(f"Project root: {repo_root}")
 
     async def forward(self, synapse: DetectionSynapse) -> DetectionSynapse:
